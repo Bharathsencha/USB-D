@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import os
 import subprocess
-import re
 import time
 
 def get_usb_devices():
@@ -9,7 +8,7 @@ def get_usb_devices():
     usb_devices = []
     
     try:
-        # Method 1: Use lsblk to find removable devices
+        # Use lsblk to find removable devices
         result = subprocess.run(['lsblk', '-d', '-o', 'NAME,RO,RM,SIZE,TYPE'], 
                               capture_output=True, text=True, check=True)
         
@@ -20,16 +19,6 @@ def get_usb_devices():
                 # Only add the device, not partitions
                 if not any(char.isdigit() for char in parts[0]):
                     usb_devices.append(device_name)
-                
-        # Method 2: Check /dev/disk/by-path for USB devices
-        by_path = '/dev/disk/by-path'
-        if os.path.exists(by_path):
-            for item in os.listdir(by_path):
-                if 'usb' in item.lower():
-                    full_path = os.path.realpath(os.path.join(by_path, item))
-                    # Only add if it's a device (not partition) and not already in the list
-                    if full_path not in usb_devices and not any(char.isdigit() for char in full_path):
-                        usb_devices.append(full_path)
                         
     except Exception as e:
         print(f"Error finding USB devices: {e}")
@@ -63,22 +52,37 @@ def unmount_device(device):
         print(f"Error unmounting device {device}: {e}")
         return False
 
-def wipe_device(device):
-    """Completely wipe a USB device"""
+def quick_wipe_device(device):
+    """Quickly wipe a USB device by destroying filesystem structures"""
     try:
-        print(f"Wiping {device}...")
+        print(f"Quickly wiping {device}...")
         
         # Unmount all partitions first
         if not unmount_device(device):
             print(f"Failed to unmount {device}, trying to continue...")
         
-        # Use dd to zero out the first part of the disk (this destroys partition table)
-        print("Zeroing out partition table...")
+        # Method 1: Use wipefs to remove all filesystem signatures
+        print("Removing filesystem signatures...")
+        subprocess.run(['wipefs', '-a', device], check=True, timeout=30)
+        
+        # Method 2: Zero out the first and last 1MB of the device
+        # This destroys partition tables and filesystem metadata
+        print("Destroying partition tables...")
+        
+        # Get device size
+        result = subprocess.run(['blockdev', '--getsize64', device], 
+                              capture_output=True, text=True, check=True)
+        device_size = int(result.stdout.strip())
+        
+        # Zero out the beginning (first 10MB)
         subprocess.run(['dd', 'if=/dev/zero', f'of={device}', 'bs=1M', 'count=10'], 
                       check=True, timeout=30)
         
-        # Wait a moment
-        time.sleep(1)
+        # Zero out the end (last 1MB)
+        if device_size > 1048576:  # Only if device is larger than 1MB
+            seek_position = (device_size - 1048576) // 1048576
+            subprocess.run(['dd', 'if=/dev/zero', f'of={device}', 'bs=1M', 
+                          f'seek={seek_position}', 'count=1'], check=True, timeout=30)
         
         # Create a new partition table (MBR)
         print("Creating new partition table...")
@@ -132,7 +136,7 @@ def main():
         # Double confirmation for each device
         confirm = input(f"Type 'YES' to wipe {device} (THIS WILL DESTROY ALL DATA): ")
         if confirm == 'YES':
-            success = wipe_device(device)
+            success = quick_wipe_device(device)
             if success:
                 print(f"Successfully processed {device}")
             else:
